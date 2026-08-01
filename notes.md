@@ -50,7 +50,7 @@ Cancer-specific confounders:
 - Aim 3, step 3: Missingness. 1) we expect some confounder missingness including ECOG performance status. Missingness will be addressed using multiple imputation under a missingness at random assumption (MAR), with imputation models including all covariates used in the analysis as well as outcomes and indicators for artificial censoring. 2) Sensitivity analyses using tipping point approach to assess robustness of departures from MAR assumption. 
 
 
-## Modeling: Regularized IPCW 
+## Modeling (Grace Period Model): Regularized IPCW 
 
 In the clone-censor-weighting approach, clinical decisions naturally introduce a risk of selection bias (and immortal time bias). For instance, a patient's clinical status may worsen (developing severe irAE at month 23), their clinician will most likely stop treatment, causing artificial censoring for their "continue" clone by stopping treatment. Consequently, the patient remaining uncensored in the "continue" arm are artificially healthier than average baseline population because those prone to irAE or progression have been censored and selectively removed. If we model the survival data directly on the remaining patients, our results will be hopelessly biased in favor of the "continue" arm—a form of selection bias under informative censoring. 
 
@@ -150,6 +150,12 @@ The resulting standardized survival curves shows a clear divergence after the 24
 --- 
 # Change TTE Design: When is the optimal time to discontinue ICI therapy?
 
+Instead of "continue" or "discontinue" at 2-years, now we can explore when the best time to discontinue ICI therapy is. This extends the two-arm target trial into a multi-arm design by expanding the treatment strategy to include multiple timepoints for discontinuation (e.g., 3, 6, 9 and 12 months). 
+
+
+
+
+##  Modeling (Treatment Discontinuation Model): 
 
 
 

@@ -1,56 +1,16 @@
+# gp-data-sim.r
+# 
+# Grace period model data simulation for fixed 2-year discontinuation decision point.
 #################################
-# EHR simulation for TTE preprocessing (patient-level + person-month)
-#################################
-rm(list = ls())
-set.seed(20260717)
+rm(list = ls()); set.seed(20260717)
 
-# constants
+source(file.path("static", "util.r")) # load helpers
+
 n <- 7837 # total n at 2-year decision point
-
 # Follow-up design aligned with protocol language.
 month.start <- 21L
 month.window.end <- 27L
 month.admin.end <- 48L
-
-# ---------- HELPERS ----------
-# helper: sample factor with probabilities
-sample_factor <- function(levels, probs, n, ordered = FALSE) {
-    stopifnot(length(levels) == length(probs), all(probs >= 0), n >= 0)
-    probs <- probs / sum(probs)
-    if (n == 0) {
-        return(factor(character(0), levels = levels, ordered = ordered))
-    }
-    x <- sample(levels, n, replace = TRUE, prob = probs)
-    factor(x, levels = levels, ordered = ordered)
-}
-
-# helper: draw stratified types given exact counts (e.g., cancer types)
-draw_stratified_types <- function(n, labels, probs) {
-    stopifnot(length(labels) == length(probs), n > 0)
-    probs <- probs / sum(probs)
-    base_counts <- floor(n * probs)
-    remainder <- n - sum(base_counts)
-    if (remainder > 0) {
-        extra <- sample.int(length(labels), size = remainder, replace = TRUE, prob = probs)
-        base_counts <- base_counts + tabulate(extra, nbins = length(labels))
-    }
-    out <- rep(labels, times = base_counts)
-    sample(out, size = n, replace = FALSE)
-}
-
-# helper: expit
-expit <- function(x) 1 / (1 + exp(-x))
-
-# helper: approximate month addition (30.4375 days per month)
-add_months_approx <- function(d, m) d + as.integer(round(30.4375 * m))
-
-# helper: multinomial sampling function for ordered factors
-sample_multicat <- function(levels, logits) { 
-    logits <- as.numeric(logits)
-    p <- exp(logits - max(logits))
-    p <- p / sum(p)
-    sample(levels, size = 1, prob = p)
-}
 
 # ---------- BASELINE COVARIATES ----------
 patient.id <- sprintf("PT%05d", seq_len(n))
@@ -401,6 +361,45 @@ X.long <- do.call(rbind, person.month.list)
 rownames(X.long) <- NULL
 
 
+
+# data structure checks
+# ------ check 1: follow-up time constraints 
+# patients should start at month 1 and not exceed month.admin.end = 48
+cat("Max follow-up month (should be <= 48):", max(X.long$month), "\n")
+cat("Min follow-up month (should be 1):", min(X.long$month), "\n")
+# ------ check 2: terminal event integrity
+# ------ check 2: terminal event integrity
+# death / irae (any.event = 1) should only occur on the very last obs. month, cannot have rows after 
+term_check <- X.long %>%
+    arrange(patient.id, month) %>%
+    group_by(patient.id) %>%
+    summarise(
+        total_events = sum(any.event),
+        # if have event, is it strictly on their final row?
+        valid_terminal = if_else(total_events > 0, last(any.event) == 1, TRUE),
+        # ensure they never have more than 1 total event
+        single_event = total_events <= 1
+    ) 
+cat("Are all events strictly terminal? should be TRUE: ", all(term_check$valid_terminal), "\n")
+cat("Do patients have max 1 event? ", all(term_check$single_event), "\n")
+# ------ check 3: treatment monotonicity (no restarting)
+# once `on.ici` switches from 1 to 0, it must NEVER switch back to 1.
+# prevents immortal time bias or logic errors in the discontinuation hazard.
+restarts <- X.long %>% 
+    arrange(patient.id, month) %>%
+    group_by(patient.id) %>%
+    mutate(ici_diff = on.ici - lag(on.ici, default = 1)) %>%
+    filter(ici_diff > 0)
+cat("Number of patients who erroneously restarted ICI: ", nrow(restarts), "\n")
+# ------ check 4: correct event mapping
+# ensure that any death/irAE events in long format perfectly match the baseline cohort's recorded event month
+event_match_check <- X.long %>%
+  filter(any.event == 1) %>%
+  left_join(X, by = "patient.id") %>%
+  mutate(month_match = (month == event.month))
+
+cat("Do all longitudinal events match baseline event months? ", all(event_match_check$month_match), "\n")
+        
 
 # ----------- Clone-based artificial censoring for TTE/IPCW
 
