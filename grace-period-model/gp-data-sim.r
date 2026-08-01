@@ -482,5 +482,4 @@ print(with(X.lc, table(assigned.strategy, censor.event)))
 
 
 invisible(list(X = X, X.long = X.long, X.lc = X.lc))
-
-
+saveRDS(list(X = X, X.long = X.long, X.lc = X.lc), file = file.path("grace-period-model", "gp-data.rds"))
