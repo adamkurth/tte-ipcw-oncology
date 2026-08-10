@@ -49,13 +49,13 @@ lb <- quantile(X.lc$ipcw, 0.01, na.rm = TRUE)
 ub <- quantile(X.lc$ipcw, 0.99, na.rm = TRUE)
 X.lc$ipcw <- pmax( lb, pmin(ub, X.lc$ipcw) )
 
-# p.weights <- ggplot(X.lc, aes(x = ipcw)) +
-#   geom_histogram(bins = 40, fill = "#3B7EA1", color = "white") +  
-#   geom_vline(xintercept = 1, linetype="dashed", color = "darkred", linewidth=1) + 
-#   theme_minimal() +
-#   labs(title = "Diagnostic: Truncated IPCW Distribution", x = "IPCW", y = "Person-Months")
-# print(p.weights)
-# ggsave(file.path("figures", "tte_ipcw_distribution.png"), width = 10, height = 6, dpi = 300)
+p.weights <- ggplot(X.lc, aes(x = ipcw)) +
+  geom_histogram(bins = 100, fill = "#3B7EA1", color = "white") +  
+  geom_vline(xintercept = 1, linetype="dashed", color = "darkred", linewidth=1) + 
+  theme_minimal() +
+  labs(title = "Diagnostic: Truncated IPCW Distribution", x = "IPCW", y = "Person-Months")
+print(p.weights)
+ggsave(file.path(fig.path, "tte_ipcw_distribution.png"), width = 10, height = 6, dpi = 300)
 
 
 
