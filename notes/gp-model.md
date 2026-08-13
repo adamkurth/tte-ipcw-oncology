@@ -307,13 +307,36 @@ because of the following reasons:
 
 ### Validation of Simulation
 
+
+
+
+
+<!-- 
 The surface level conclusion of this modeling approach concludes that continuing therapy (or discontinuing as late as 42 months) shows the highest overall survival (early discontinuation shows lowest survival), which confirms the simulation result. Continuing therapy for as long as possible yields the highest overall survival rates, with the shortest discontinuation arms (6, 12 months) showing the lowest survival. Staying on ICI thearpy provides a protective effect against mortality
 
 Suprisingly, continuing therapy for toxicity also yielded higher irAE-free survival. Strategies that stop at 18 or 24 dip the lowest in irAE-free survival. This tells us to never stop treatment...
 
 However, in the underlying DGP I explicitly programmed `on.ici == 1` to increase the log-odds of irAE by `+0.30`. But in the estimated coefficients for irAE, we see: `on.ici -0.0979118`, meaning the negative coefficient for active treatment, concluding that the drug protects patients from toxicity -— which is not correct—— and projects highest irAE-free survival for continuous therapy. This is called survivor bias. 
 
-Patients who are suseptible to irAEs will develop them early in treatment and subsequently drop out or discontinue/censored. Patients who survive the continuous arm through 24, 36, 48 are healthier and posess unmeasured resiliency to toxicity. Because the IPCW weights do not perfectly adjust the hidden frailty, the outcome model looks at the long term survivors, sees that they're on treatment, and conclude falsely that the drug is protective against toxicity. This is a classic example of survivor bias, and is a limitation of the current modeling approach. **The survival model works well but the toxicity model needs to be revised.**
+Patients who are suseptible to irAEs will develop them early in treatment and subsequently drop out or discontinue/censored. Patients who survive the continuous arm through 24, 36, 48 are healthier and posess unmeasured resiliency to toxicity. Because the IPCW weights do not perfectly adjust the hidden frailty, the outcome model looks at the long term survivors, sees that they're on treatment, and conclude falsely that the drug is protective against toxicity. This is a classic example of survivor bias, and is a limitation of the current modeling approach. **The survival model works well but the toxicity model needs to be revised.** -->
 
 
 
+NONMONOTONICITY IS WEIRD
+RUN WITH DIFFERENT SEED
+CHANGE CUMULATIVE INCIDENCE EACH OUTCOME AT 36 MONTHS 
+ -> SUMMARIZE EACH RESULT IN TERMS OF STD ERROR 
+
+MIMIC ROUGH SIMULATION ATTRITION RATES
+READ LUNG CANCER PAPER ON
+READ NUMBER OF PEOPLE WHO ARE TREATED (REBECCA TABLES / PRELIMINARY DATA)
+
+
+sanity check: 
+calculate true survival probabilites over all conditional probabilities, and calculate (not estimate) true counterfactual survival probabilities
+validate with estimated survival probabilities from model, and compare to true survival probabilities.
+
+
+
+
+(later) erroneous censoring

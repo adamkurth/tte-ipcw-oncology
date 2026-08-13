@@ -2,7 +2,7 @@
 # 
 # Treatment discontinuation model data simulation for multi-arm discontinuation decision point.
 #################################
-rm(list = ls()); set.seed(20260801)
+rm(list = ls()); set.seed(20260813)
 
 
 source(file.path("static", "util.r")) # load helpers
@@ -79,44 +79,44 @@ pd.l1[c(idx.bladder, idx.kidney, idx.melanoma)] <- sample_factor(c("Negative", "
 # probability of receiving ICI + Chemo among NSCLC patients
 # among NSCLC patients, community practice and Medicaid insurance are more likely to receive ICI + Chemo, ECOG == 2 and older age are less likely to receive combination therapy.
 for (i in idx.nsclc) {
-    lp.combo <- -0.45 +
+    lp.combo <- (-0.45 +
         0.35 * (practice.type[i] == "Community") +          # community practice more likely to receive ICI + Chemo 
         0.28 * (insurance.type[i] == "Medicaid") +          # Medicaid 
         0.18 * (insurance.type[i] == "Private") -           # private insurance less likely to receive ICI + Chemo
         0.25 * (age[i] >= 75) -                             # older age less likely 
-        0.20 * (as.integer(as.character(ecog[i])) == 2)     # ECOG 2 less likely
+        0.20 * (as.integer(as.character(ecog[i])) == 2))     # ECOG 2 less likely
     
     p.combo <- expit(lp.combo) 
     
     treatment.type[i] <- sample_factor(levels = c("ICI alone", "ICI + Chemo"), probs = c(1 - p.combo, p.combo), n = 1)
 }
-
+ 
 
 
 # probability of receiving ICI + Enfortumab Vedotin among bladder cancer patients
 for (i in idx.bladder) {
-    lp.ev <- -1.0 +
+    lp.ev <- (-1.0 +
         0.45 * (practice.type[i] == "Academic") +           # academic practice more likely to receive ICI + Enfortumab Vedotin
         0.25 * (insurance.type[i] == "Private") -           # private insurance less likely
-        0.25 * (insurance.type[i] == "Medicaid")            # Medicaid insurance less likely
+        0.25 * (insurance.type[i] == "Medicaid"))            # Medicaid insurance less likely
     
     p.ev <- expit(lp.ev)
-
+ 
     treatment.type[i] <- sample_factor(levels = c("ICI alone", "ICI + Enfortumab Vedotin"), probs = c(1 - p.ev, p.ev), n = 1) 
 }
-
-
+ 
+ 
 # probability of receiving ICI doublet or ICI + Targeted Therapy among kidney cancer patients
 for (i in idx.kidney) {
     # IMDC influenced by age/ECOG.
-    lp.poor <- -1.1 + 
+    lp.poor <- (-1.1 + 
                 0.35 * (as.integer(as.character(ecog[i])) == 2) +   # ECOG 2x more likely to be poor risk (= 2)
-                0.25 * (age[i] >= 75)                               # older ages more likely to be poor risk
-    lp.intermediate <- 0.0 + 
-                0.20 * (as.integer(as.character(ecog[i])) >= 1) # ECOG levels 1 or 2 more likely to be intermediate risk
+                0.25 * (age[i] >= 75))                               # older ages more likely to be poor risk
+    lp.intermediate <- (0.0 + 
+                0.20 * (as.integer(as.character(ecog[i])) >= 1)) # ECOG levels 1 or 2 more likely to be intermediate risk
     
     imdc.risk.score[i] <- sample_multicat(levels = c("Favorable", "Intermediate", "Poor"), logits = c(0, lp.intermediate, lp.poor))
-
+ 
     # Treatment choice influenced by IMDC risk score, practice type, and insurance.
     logits.tx <- c(
         "ICI alone" = 0,                                            # baseline 
@@ -127,28 +127,28 @@ for (i in idx.kidney) {
                          0.55 * (imdc.risk.score[i] == "Poor") +    # poor IMDC risk more likely to receive targeted therapy 
                          0.2 * (insurance.type[i] != "Medicaid")    # non-Medicaid insurance more likely to receive targeted therapy
     )
-
+ 
     treatment.type[i] <- sample_multicat(levels = names(logits.tx), logits = logits.tx)
 }
-
-
+ 
+ 
 # probability of receiving ICI + Targeted Therapy among melanoma patients
 for (i in idx.melanoma) {
-    lp.targeted <- -1.2 + 
+    lp.targeted <- (-1.2 + 
                     0.45 * (practice.type[i] == "Academic") +   # academic practice more likely to receive targeted therapy
-                    0.30 * (insurance.type[i] == "Private")     # private insurance more likely to receive targeted therapy
-
+                    0.30 * (insurance.type[i] == "Private"))     # private insurance more likely to receive targeted therapy
+ 
     p.targeted <- expit(lp.targeted)
-
+ 
     treatment.type[i] <- sample_factor(levels = c("ICI alone", "ICI + Targeted Therapy"), probs = c(1 - p.targeted, p.targeted), n = 1)
 }
-
-
+ 
+ 
 head(treatment.type[idx.kidney], 10) # check treatment distribution for kidney cancer patients
 head(treatment.type[idx.melanoma], 10) # check treatment distribution for melanoma patients
 head(treatment.type[idx.nsclc], 10) # check treatment distribution for lung cancer patients
 head(treatment.type[idx.bladder], 10) # check treatment distribution for bladder cancer patients
-
+ 
 check.table <- table(cancer.type, treatment.type)
 check.table # check treatment distribution by cancer type
 
@@ -166,20 +166,24 @@ death.month <- rep(Inf, n)
 irae.month <- rep(Inf, n) 
 
 
-
+# tx.combo: combination-therapy indicator. Computed once, vectorized, over
+# all n patients so it can be stored as a real column in X (previously this
+# was only a loop-local variable) 
+combo.treatment.types <- c("ICI + Chemo", "ICI + Enfortumab Vedotin", "ICI doublet", "ICI + Targeted Therapy")
+tx.combo.vec <- as.integer(treatment.type %in% combo.treatment.types)
 
 for (i in seq_len(n)) {
-
+ 
     ecogi <- as.integer(as.character(ecog[i]))  # convert ECOG factor to integer
     stage4 <- (initial.stage[i] == "IV")        # indicator
-    tx.combo <- as.integer(treatment.type[i] %in% c("ICI + Chemo", "ICI + Enfortumab Vedotin", "ICI doublet", "ICI + Targeted Therapy"))
-
-
+    tx.combo <- tx.combo.vec[i]                 # combination-therapy indicator for this patient (see vectorized def above)
+ 
+ 
     for (m in month.start:month.admin.end) {
-
+ 
         # natural discontinuation organically scales with time
         # + spikes at clinical decision/scanning intervals (3, 6, 9, 12 months)
-        lp.disc <- -4.5 
+        lp.disc <- (-4.5 
             + 0.03 * (age[i] - 65)                      # older age slightly inc disc risk
             + 0.35 * (ecogi == 1 ) + 0.75 * (ecogi == 2)# ECOG 1 or 2 inc disc risk 
             + 0.20 * (practice.type[i] == "Community")  # community practice slightly inc disc risk
@@ -187,38 +191,38 @@ for (i in seq_len(n)) {
             - 0.10 * (insurance.type[i] == "Private")   # private insurance slightly dec disc risk
             + 0.15 * tx.combo                           # combo therapy slightly inc disc risk
             + 0.50 * (m %in% seq(6, 42, by = 6))        # clinical scan interval spikes every 6mo
-            + 0.02 * m                                  # gradual increase in risk over time
-
+            + 0.02 * m)                                  # gradual increase in risk over time
+ 
         u <- runif(1); p.disc <- expit(lp.disc) # probability of discontinuation at month m
         if (u < p.disc ) { 
             discontinue.month[i] <- m; break
         }
-
+ 
     }
-
+ 
     for (m in month.start:month.admin.end) {
     
-
+ 
         on.ici <- as.integer(m < discontinue.month[i]) # indicator for still on ICI therapy
-
-        lp.death <- -4.9 
+ 
+        lp.death <- (-4.9 
             + 0.05 * (age[i] - 65)                          # older age slightly inc death risk
             + 0.55 * (ecogi == 1 ) + 1.10 * ( ecogi == 2)   # ECOG 1 or 2 inc death risk
             + 0.40 * stage4                                 # stage IV inc death risk
             + 0.20 * (cancer.type[i] == "Bladder")          # bladder slightly inc death risk
             + 0.15 * (cancer.type[i] == "Kidney")           # kidney slightly inc death risk
             - 0.10 * (cancer.type[i] == "Melanoma")         # melanoma slightly dec death risk
-            + 0.20 * (1 - on.ici)                           # off ICI therapy slightly inc death risk
-            + 0.02 * m                                      # off ICI therapy slightly inc death risk
-
-        lp.irae <- -5.4 
+            + 0.20 * (1 - on.ici)                           # TIME-TREND: off ICI therapy slightly inc death risk as time progresses
+            + 0.02 * m)                                     # TIME-TREND: gradual increase in risk over time
+ 
+        lp.irae <- (-5.4 
             + 0.30 * on.ici                                 # on ICI therapy inc IRAE risk
             + 0.25 * tx.combo                               # combo therapy inc IRAE risk
             + 0.20 * (sex[i] == "Female")                   # female sex slightly inc IRAE risk
             + 0.25 * (pd.l1[i] == "High")                   # high PD-L1 expression inc IRAE risk
             + 0.15 * (cancer.type[i] == "Melanoma")         # melanoma slightly inc IRAE risk
-            + 0.20 * (m <= 12)                              # first year of therapy inc IRAE risk
-
+            + 0.20 * (m <= 12))                             # TIME-TREND: first year of therapy inc IRAE risk
+ 
         u <- runif(1); p.death <- expit(lp.death) # probability of death at month m
         if (u < p.death ) { 
             death.month[i] <- m; break
@@ -239,7 +243,6 @@ event.type.chr[death.month < irae.month & death.month <= month.admin.end] <- "De
 event.type.chr[irae.month < death.month & irae.month <= month.admin.end] <- "irAE"
 event.type <- factor(event.type.chr, levels = c("irAE", "Death", "Administrative censoring"))
 
-
 # ---------- Build patient-level cohort X ----------
 X <- data.frame(
     patient.id = patient.id,
@@ -255,6 +258,7 @@ X <- data.frame(
     pd.l1 = pd.l1,
     histology = histology,
     treatment.type = treatment.type,
+    tx.combo = tx.combo.vec,
     imdc.risk.score = imdc.risk.score,
     advanced.dx.date = advanced.dx.date,
     ici.start.date = ici.start.date,
@@ -268,21 +272,23 @@ X <- data.frame(
 )
 
 
+
+
 # ---------- DISCRETE-TIME LONG FORMAT X.long ----------
 person.month.list <- vector("list", n) # list to hold person-month data for each patient
-
+ 
 for ( i in seq_len(n)) {
-
-
+ 
+ 
     end.month <- X$event.month[i] # end month for this patient
     months <- month.start:end.month 
-
+ 
     if (length(months) == 0)  next
         
     disc.month.i    <- ifelse(is.na(X$discontinue.month[i]), Inf, X$discontinue.month[i])
     death.month.i   <- ifelse(is.na(X$death.month[i]), Inf, X$death.month[i])
     irae.month.i    <- ifelse(is.na(X$irae.month[i]), Inf, X$irae.month[i])
-
+ 
     on.ici          <- as.integer(months < disc.month.i) # indicator for still on ICI therapy
     death.event     <- as.integer(months == death.month.i) # indicator for death event
     irae.event      <- as.integer(months == irae.month.i) # indicator for IRAE event
@@ -299,19 +305,19 @@ for ( i in seq_len(n)) {
         any.event = as.integer(death.event | irae.event),
         stringsAsFactors = FALSE
     )
-
+ 
 }
+
 
 X.long <- do.call(rbind, person.month.list)
 rownames(X.long) <- NULL
-
 
 # data structure checks
 # ------ check 1: follow-up time constraints 
 # patients should start at month 1 and not exceed month.admin.end = 48
 cat("Max follow-up month (should be <= 48):", max(X.long$month), "\n")
 cat("Min follow-up month (should be 1):", min(X.long$month), "\n")
-# ------ check 2: terminal event integrity
+
 # ------ check 2: terminal event integrity
 # death / irae (any.event = 1) should only occur on the very last obs. month, cannot have rows after 
 term_check <- X.long %>%
@@ -326,6 +332,7 @@ term_check <- X.long %>%
     ) 
 cat("Are all events strictly terminal? should be TRUE: ", all(term_check$valid_terminal), "\n")
 cat("Do patients have max 1 event? ", all(term_check$single_event), "\n")
+
 # ------ check 3: treatment monotonicity (no restarting)
 # once `on.ici` switches from 1 to 0, it must NEVER switch back to 1.
 # prevents immortal time bias or logic errors in the discontinuation hazard.
@@ -341,7 +348,7 @@ event_match_check <- X.long %>%
   filter(any.event == 1) %>%
   left_join(X, by = "patient.id") %>%
   mutate(month_match = (month == event.month))
-
+ 
 cat("Do all longitudinal events match baseline event months? ", all(event_match_check$month_match), "\n")
         
 # ... so far nothing really has changed besides how we define treatment arms & start/stop times. 
@@ -366,13 +373,13 @@ X.lc$artificial.censor <- 0L # no censoring by default
 #   defines censoring rules for each clone based on their assigned strategy and observed behavior.
 #   if a patient stops ICI therapy before their assigned target month (based on the original X.long data), they are considered to have "stopped too early" and are censored at that point.
 #   Likewise, if a patient continues ICI therapy beyond their assigned target month (by next follow-up month) and is still on therapy, they are considered to have "failed to stop" and are censored at that point.
-
+ 
 # 1. stopped too early (before target month, patient is not on ICI)
 stopped.early <- ( X.lc$month < X.lc$target.disc.month & X.lc$on.ici == 0 )
 # 2. stopped too late / failed to stop (after target month + 2 mo grace period, patient is still on ICI)
 failed.to.stop <- ( X.lc$month > (X.lc$target.disc.month + 2) & X.lc$on.ici == 1 & X.lc$target.disc.month != 48 )  # only applies to discontinuation arms, not the "continue" arm
 X.lc$artificial.censor <- as.integer(stopped.early | failed.to.stop) 
-
+ 
 # keeps rows up to first artificial censoring for each clone
 X.lc$clone.id <- paste0(X.lc$patient.id, "_", X.lc$assigned.strategy) # unique clone identifier
 first.censor <- tapply(
@@ -380,31 +387,31 @@ first.censor <- tapply(
     X.lc$clone.id,
     min
 ) # first artificial censoring month for each clone
-
+ 
 X.lc$first.censor.month <- first.censor[X.lc$clone.id] # map back to X.lc
 X.lc <- X.lc[X.lc$month <= X.lc$first.censor.month, ] # keep rows up to first artificial censoring
 X.lc$censor.event <- as.integer(X.lc$month == X.lc$first.censor.month & is.finite(X.lc$first.censor.month)) # indicator for artificial censoring event
 X.lc$first.censor.month <- NULL # remove temporary column
 X.lc$target.disc.month <- NULL # clean up temp vars 
-
+ 
 
 # merge baseline covariates into long format for modeling
 baseline.vars <- c(
     "patient.id", "age", "sex", "race", "ecog", "smoking.status", "practice.type", "insurance.type", 
-    "initial.stage", "cancer.type", "pd.l1", "histology", "treatment.type", "imdc.risk.score"
+    "initial.stage", "cancer.type", "pd.l1", "histology", "treatment.type", "tx.combo", "imdc.risk.score"
 )
 X.long <- merge(X.long, X[, baseline.vars], by = c("patient.id", "cancer.type"), all.x = TRUE, sort=FALSE)
 X.lc <- merge(X.lc, X[, baseline.vars], by = c("patient.id", "cancer.type"), all.x = TRUE, sort=FALSE)
+ 
 
 # diagnostics
 cat("Patient-level cohort X:\n  n patients:", nrow(X), "\n")
 cat("\nCloned longitudinal cohort X.lc (TD Model):\n  n rows:", nrow(X.lc), "\n")
 cat("  artificial censor events by multiple strategies:\n")
 print(with(X.lc, table(assigned.strategy, censor.event)))
-
+ 
 invisible(list(X = X, X.long = X.long, X.lc = X.lc))
 saveRDS(list(X = X, X.long = X.long, X.lc = X.lc), file = file.path("treatment-discontinuation-model", "td-data.rds"))
-
 
 
 
@@ -423,7 +430,7 @@ plot.path <- file.path("figures", "td-model", "td-data")
 # Visualization 1: Mechanics of Artificial Censoring
 # Show not just WHEN clones are censored but WHY (mechanism of deviation)
 # this dictates how the IPCW models must be structured
-
+ 
 censor.data <- X.lc %>% 
     filter(censor.event == 1) %>%
     mutate(
@@ -438,7 +445,7 @@ censor.data <- X.lc %>%
             TRUE ~ "Other"
         )
     )
-
+ 
 p1 <- ggplot(censor.data, aes(x = month, fill = censor.reason)) +
   geom_histogram(binwidth = 1, position = "stack", alpha = 0.85, color = "black") +
   facet_wrap(~ assigned.strategy, scales = "free_y", ncol = 3) +
@@ -457,10 +464,10 @@ p1 <- ggplot(censor.data, aes(x = month, fill = censor.reason)) +
     strip.text = element_text(face = "bold", size = 11),
     panel.grid.minor = element_blank()
   )
-
+ 
 print(p1)
 ggsave(filename = file.path(plot.path, "artificial_censoring_distribution.png"), plot = p1, width = 12, height = 8, dpi = 300)
-
+ 
 # ---------------------------------------------------------
 # Visualization 2: Denominator Attrition (At-Risk Pool)
 # ---------------------------------------------------------
@@ -469,7 +476,7 @@ ggsave(filename = file.path(plot.path, "artificial_censoring_distribution.png"),
 attrition.data <- X.lc %>%
   group_by(assigned.strategy, month) %>%
   summarise(patients.at.risk = n(), .groups = "drop")
-
+ 
 p2 <- ggplot(attrition.data, aes(x = month, y = patients.at.risk, color = assigned.strategy, group = assigned.strategy)) +
     geom_step(linewidth = 1.2, alpha = 0.8) + # geom_step better reflects discrete monthly intervals
     theme_minimal() +
@@ -487,17 +494,17 @@ p2 <- ggplot(attrition.data, aes(x = month, y = patients.at.risk, color = assign
         panel.grid.minor.x = element_blank(),
         plot.title = element_text(face = "bold")
     )
-
+ 
 print(p2)
 ggsave(filename = file.path(plot.path, "attrition_over_time.png"), plot = p2, width = 10, height = 6, dpi = 300)
-
-
+ 
+ 
 # ---------------------------------------------------------
 # Visualization 3: Naive (Unweighted) Target Trial Emulation
 # ---------------------------------------------------------
 # establish biased baseline. This proves informative censoring exists in the data. 
 # because patients who are sick are more likely to stop early, skew these crude curves (i.e. using g-formula without IPCW) to show the bias in naive estimates.
-
+ 
 km.summ <- X.lc %>%
   group_by(clone.id, assigned.strategy) %>%
   summarise(
@@ -507,12 +514,12 @@ km.summ <- X.lc %>%
     event.status = max(any.event), 
     .groups = "drop"
   )
-
+ 
 # Fit the crude KM model
 strat.levels <- c(paste0("disc.", seq(6, 48, by = 6), "mo"), "cont")
 km.summ$assigned.strategy <- factor(km.summ$assigned.strategy, levels = intersect(strat.levels, unique(km.summ$assigned.strategy))) # ensure consistent ordering
 km_fit <- survfit(Surv(exit.month, event.status) ~ assigned.strategy, data = km.summ)
-
+ 
 p3 <- ggsurvplot(
   km_fit,
   data = km.summ,
@@ -530,4 +537,3 @@ p3 <- ggsurvplot(
 )
 print(p3)
 ggsave(filename = file.path(plot.path, "naive_km_event_free_survival.png"), plot = p3$plot, width = 12, height = 8, dpi = 300)
-
