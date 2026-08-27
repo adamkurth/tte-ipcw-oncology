@@ -70,18 +70,14 @@ calibrate.intercept.shift <- function( target.ci,
     lo <- shift.range[1]; hi <- shift.range[2]
     f.lo <- obj(lo); f.hi <- obj(hi) 
     if (sign(f.lo) == sign(f.hi)) {
-        stop(sprintf(
-            paste(
-                "target.ci = %.3f for '%s' is not reachable within", 
-                  "shift.range [%s, %s] (achieved CI at bounds: %.3f, %.3f).",
-                  "Widen shift.range."),
-            ),
-            target.ci, outcome, lo, hi, f.lo + target.ci, f.hi + target.ci )) 
+            stop(sprintf(
+                "target.ci = %.3f for '%s' unreachable in shift.range [%.1f, %.1f] (CuI at bounds: %.3f, %.3f). Widen shift.range.",
+                target.ci, outcome, lo, hi, f.lo + target.ci, f.hi + target.ci))
     }
 
     #  it finds the root of the function obj(shift) = ci36(shift) - target.ci, i.e. the shift that makes ci36(shift) = target.ci
     root <- uniroot(obj, interval = c(lo, hi), tol = tol)
-    return(shift=root$root, achieved.ci = ci36(root$root), target.ci=target.ci)
+    return(list(shift = root$root, achieved.ci = ci36(root$root), target.ci = target.ci))
 
 }
 

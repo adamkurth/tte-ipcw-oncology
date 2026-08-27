@@ -202,6 +202,19 @@ simulate.td.data <- function(   seed,
     tx.combo.vec <- as.integer(treatment.type %in% combo.treatment.types)
 
 
+
+    # --- PRE-DRAWN UNIFORMS -----------------------------------------------------
+    # One shared sequential RNG stream means any change to a shift alters some
+    # patient's break month, which changes how many runif() calls they consume and
+    # shifts the stream for every LATER patient. Effect: ci36() is NON-MONOTONE in
+    # the shift even at a fixed seed (measured: range 0.031 over a 0.06 window,
+    # ~6x the calibration tolerance), so uniroot cannot converge and the alternating
+    # calibration falls into a 2-cycle. Indexing a pre-drawn (patient x month) matrix
+    # makes each patient's draws independent of control flow and of other patients.
+    U.disc  <- matrix(runif(n * month.admin.end), nrow = n)
+    U.death <- matrix(runif(n * month.admin.end), nrow = n)
+    U.irae  <- matrix(runif(n * month.admin.end), nrow = n)
+
     for (i in seq_len(n)) {
     
         ecogi <- as.integer(as.character(ecog[i]))  # convert ECOG factor to integer
@@ -223,7 +236,7 @@ simulate.td.data <- function(   seed,
                 + 0.50 * (m %in% seq(6, 42, by = 6))        # clinical scan interval spikes every 6mo
                 + 0.02 * m)                                  # gradual increase in risk over time
     
-            u <- runif(1); p.disc <- expit(lp.disc) # probability of discontinuation at month m
+            u <- U.disc[i, m];  p.disc  <- expit(lp.disc) # probability of discontinuation at month m
             if (u < p.disc ) { 
                 discontinue.month[i] <- m; break
             }
@@ -239,16 +252,19 @@ simulate.td.data <- function(   seed,
             }
 
             lp.death <- (-4.9 
+                + death.intercept.shift
                 + 0.05 * (age[i] - 65)                          # older age slightly inc death risk
-                + 0.55 * (ecogi == 1 ) + 1.10 * ( ecogi == 2)   # ECOG 1 or 2 inc death risk
+                + 0.55 * (ecogi == 1 ) + 1.10 * ( ecogi == 2) + 1.50 * (ecogi == 3)   # ECOG 1, 2, or 3 inc death risk
                 + 0.40 * stage4                                 # stage IV inc death risk
                 + 0.20 * (cancer.type[i] == "Bladder")          # bladder slightly inc death risk
                 + 0.15 * (cancer.type[i] == "Kidney")           # kidney slightly inc death risk
                 - 0.10 * (cancer.type[i] == "Melanoma")         # melanoma slightly dec death risk
                 + 0.20 * (1 - on.ici)                           # TIME-TREND: off ICI therapy slightly inc death risk as time progresses
                 + 0.02 * m)                                     # TIME-TREND: gradual increase in risk over time
+
     
             lp.irae <- (-5.4 
+                + irae.intercept.shift
                 + 0.30 * on.ici                                 # on ICI therapy inc IRAE risk
                 + 0.25 * tx.combo                               # combo therapy inc IRAE risk
                 + 0.20 * (sex[i] == "Female")                   # female sex slightly inc IRAE risk
@@ -256,11 +272,12 @@ simulate.td.data <- function(   seed,
                 + 0.15 * (cancer.type[i] == "Melanoma")         # melanoma slightly inc IRAE risk
                 + 0.20 * (m <= 12))                             # TIME-TREND: first year of therapy inc IRAE risk
     
-            u <- runif(1); p.death <- expit(lp.death) # probability of death at month m
+            u <- U.death[i, m] # assign pre-drawn uniform
+            p.death <- expit(lp.death) # probability of death at month m
             if (u < p.death ) { 
                 death.month[i] <- m; break
             }
-            u <- runif(1); p.irae <- expit(lp.irae) # probability of IRAE at month m
+            u <- U.irae[i, m];  p.irae  <- expit(lp.irae) # probability of IRAE at month m
             if (u < p.irae ) { 
                 irae.month[i] <- m; break
             }
@@ -462,11 +479,7 @@ simulate.td.data <- function(   seed,
 
 
 
- 
-# ==============================================================================
-# MAIN EXECUTION GUARD (Equivalent to Python's `if __name__ == "__main__":`)
-# ==============================================================================
-if (sys.nframe() == 0L) {
+ if (sys.nframe() == 0L) {
     
     cat("\n======================================================\n")
     cat(" Running Test Suite for simulate.td.data()\n")

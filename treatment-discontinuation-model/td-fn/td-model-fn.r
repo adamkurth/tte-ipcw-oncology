@@ -10,6 +10,16 @@ fit.td.gcomp <- function(data.list, verbose=FALSE){
     #   X, X.long, X.lc
     X <- data.list$X; X.long <- data.list$X.long; X.lc <- data.list$X.lc
 
+    # ---- unordered factors, for INTERPRETABILITY (not a modelling change) ----
+    # R gives ordered factors polynomial contrasts (ecog.L/.Q/.C). Those span the
+    # same column space as treatment contrasts -- identical deviance, identical df,
+    # identical fitted values (verified to 1e-15) -- but they cannot be read against
+    # the DGP constants. Treatment contrasts give one coefficient per level, so
+    # `ecog2` can be compared directly against its true +1.10.
+    X.lc$ecog          <- factor(as.character(X.lc$ecog),          levels = c("0","1","2","3"))
+    X.lc$pd.l1         <- factor(as.character(X.lc$pd.l1),         levels = c("Negative","Low","High"))
+    X.lc$initial.stage <- factor(as.character(X.lc$initial.stage), levels = c("III","IV"))
+
     # -------------- calculate IPCW --------------
     # same as grace-period-model, but now censoring is based on each 6-month checkup 
     
@@ -54,12 +64,16 @@ fit.td.gcomp <- function(data.list, verbose=FALSE){
     # td-crossarm-diagnostics.r). It stays in m.num/m.denom above, where
     # censoring is genuinely a function of it.
     fit.msm.death <- glm(death.event ~ ns(month, df = 3) + 
-                    age + sex + ecog + cancer.type + practice.type + on.ici,
+                    age + sex + ecog + cancer.type + practice.type +
+                    initial.stage +          # in the true death DGP (+0.40 stage IV)
+                    on.ici,
                 family = quasibinomial(link = "logit"), 
                 weights = ipcw,
                 data = X.lc)
     fit.msm.irae <- glm(irae.event ~ ns(month, df = 3) +
-                    age + sex + ecog + cancer.type + practice.type + on.ici,
+                    age + sex + ecog + cancer.type + practice.type +
+                    tx.combo + pd.l1 +       # in the true irAE DGP (+0.25 each)
+                    on.ici,
                 family = quasibinomial(link = "logit"), 
                 weights = ipcw,
                 data = X.lc)
@@ -68,6 +82,29 @@ fit.td.gcomp <- function(data.list, verbose=FALSE){
         print(summary(fit.msm.death))
         print(summary(fit.msm.irae))
     }
+
+    # ---- tidy coefficient table (both outcomes, one data.frame) --------------
+    # Returned so a replication loop can rbind across seeds with no extra plumbing.
+    # These are DIAGNOSTIC: they never enter the estimand, which is produced by the
+    # g-computation below. But they are how you check the outcome models are
+    # recovering the DGP rather than absorbing an omitted variable.
+    tidy.coef <- function(fit, outcome) {
+        cc <- summary(fit)$coefficients
+        data.frame(outcome   = outcome,
+                   term      = rownames(cc),
+                   estimate  = cc[, 1],
+                   std.error = cc[, 2],
+                   row.names = NULL, stringsAsFactors = FALSE)
+    }
+    coef.df <- rbind(tidy.coef(fit.msm.death, "death"),
+                     tidy.coef(fit.msm.irae,  "irae"))
+
+    # weight diagnostics, also returned -- extreme weights are the usual reason an
+    # IPCW estimator degrades, and you want them per-replication, not just per-run.
+    w <- X.lc$ipcw
+    weight.diag <- data.frame(mean = mean(w), sd = sd(w), min = min(w), max = max(w),
+                              p99 = unname(quantile(w, .99)),
+                              pct.gt5 = mean(w > 5), n.nonfinite = sum(!is.finite(w)))
 
     # ------------- DIAGNOSTIC: aliased / non-identifiable coefficients ---------------------
     # check for any coeffients in glm fit that are NA (rank deficiency, e.g assigned.strategy x covariate stratum with ~0 events for rare irAE outcomes),
@@ -199,34 +236,63 @@ fit.td.gcomp <- function(data.list, verbose=FALSE){
         # pred.link <- predict(cv.fit, newx = X.pred, s = "lambda.1se", type="response")
         # tmp.data$p.event <- as.numeric(pred.link)
         # ---------
-    
-        # monthly survival probs 
-        tmp.data$p.surv.death <- 1 - tmp.data$p.event.death
-        tmp.data$p.surv.irae  <- 1 - tmp.data$p.event.irae
         
-        # sort to ensure cumprod uses chronological per patient
+        # ---- competing-risks cumulative incidence (estimand: option B) ----------
+        # the simulator checks BEFORE irAE within a month, so surviving month j, means surviving both death and irAE in month j.
+        # miroring that order exactly:
+        # 
+        #   S(m)     = prod_{j<=m} (1-pd(j)) * (1-pr(j))        free of BOTH events
+        #   CIF_d(m) = sum_{j<=m}  S(j-1) * pd(j)
+        #   CIF_r(m) = sum_{j<=m}  S(j-1) * (1-pd(j)) * pr(j)
+        #
+        # cif.death now depends on irae model through S(), two outcomes are no longer seperable. 
         tmp.data <- tmp.data[order(tmp.data$patient.id, tmp.data$month), ]
-    
-        # cumulative survival provs per patient over time
-        tmp.data$cum.surv.death <- ave(tmp.data$p.surv.death, tmp.data$patient.id, FUN=cumprod)
-        tmp.data$cum.surv.irae  <- ave(tmp.data$p.surv.irae, tmp.data$patient.id, FUN=cumprod)
-        # aggregate to get marginal survival curves (mean across patients) for each month
-        marg.death <- aggregate(cum.surv.death ~ month, data = tmp.data, FUN = mean, na.action = na.omit)
-        marg.irae  <- aggregate(cum.surv.irae  ~ month, data = tmp.data, FUN = mean, na.action = na.omit)
 
-        n.months.death <- nrow(marg.death); n.months.irae <- nrow(marg.irae)
-        if (n.months.death < length(months.seq) || n.months.irae < length(months.seq)) {
-            cat(sprintf("  [%s] WARNING: dropped months in aggregation -> death: %d/%d, irae: %d/%d\n",
-                        strategy.name, n.months.death, length(months.seq), n.months.irae, length(months.seq)))
-        }
-    
-        marg.surv <- merge(marg.death, marg.irae, by = "month", all = TRUE)
+        p.d <- tmp.data$p.event.death
+        p.r  <- tmp.data$p.event.irae
+        q <- (1-p.d) * (1-p.r) # prob of surviving both events in month j
+
+        # S(m-1): within-patient lagged cumulative product
+        tmp.data$S.lag <- ave(q, tmp.data$patient.id, FUN = function(x) c(1, head(cumprod(x), -1))) # lagged cumprod, S(0) = 1
+        tmp.data$S.both <- ave(q, tmp.data$patient.id, FUN = cumprod) # cumulative product of surviving both events
+        
+        # CIFs: cumulative incidence functions for death and irAE
+        tmp.data$cif.death <- ave(tmp.data$S.lag * p.d,                 tmp.data$patient.id, FUN = cumsum)
+        tmp.data$cif.irae  <- ave(tmp.data$S.lag * (1-p.d) * p.r,       tmp.data$patient.id, FUN = cumsum)
+
+        # plotted quantities: complements of subdistributions
+        tmp.data$surv.death <- 1 - tmp.data$cif.death
+        tmp.data$surv.irae  <- 1 - tmp.data$cif.irae
+
+        # keep separate aggregate() calls from orignal fix. they still stop one outcome's missingness
+        # from contaminating (changing) which patients are averaged into the other outcome's marginal curve at each month.
+        marg.death <- aggregate(surv.death ~ month, data = tmp.data, FUN = mean, na.action = na.omit)
+        marg.irae  <- aggregate(surv.irae  ~ month, data = tmp.data, FUN = mean, na.action = na.omit)
+        marg.surv <- merge(marg.death, marg.irae, by="month", all=TRUE)
         marg.surv$strategy <- strategy.name
+
+        # ------- guardrail 1: exact identity -------
+        ident <- aggregate(cbind(cif.death, cif.irae, S.both) ~ month, data = tmp.data, FUN = mean)
+        off <- abs(ident$cif.death + ident$cif.irae + ident$S.both - 1)
+        if (any(off > 1e-8)) {
+            cat(sprintf("  [%s] *** CIF IDENTITY VIOLATED: max |CIF_d + CIF_r + S - 1| = %.3e ***\n",
+                        strategy.name, max(off)))
+        }
+
+        # ---- guardrail 2: monotonicity (1 - CIF is non-increasing by construction) ----
+        for (nm in c("surv.death", "surv.irae")) {
+            dd <- diff(marg.surv[[nm]])
+            if (any(dd > 1e-8, na.rm = TRUE)) {
+                cat(sprintf("  [%s] *** NON-MONOTONIC %s at month(s): %s ***\n", strategy.name, nm,
+                            paste(marg.surv$month[-1][which(dd > 1e-8)], collapse = ", ")))
+            }
+        }
+
     
         # guardrail: each per-strategy marginal death curve MUST be non-increasing
         # in month (up to floating point tolerance). If this trips, something
         # upstream is still wrong
-        d <- diff(marg.surv$cum.surv.death)
+        d <- diff(marg.surv$surv.death)
         if (any(d > 1e-8, na.rm = TRUE)) {
             bad.months <- marg.surv$month[-1][which(d > 1e-8)]
             cat(sprintf("  [%s] *** NON-MONOTONIC OS CURVE at month(s): %s ***\n",
@@ -259,7 +325,7 @@ fit.td.gcomp <- function(data.list, verbose=FALSE){
     mono.check <- surv.results %>%
         arrange(strategy, month) %>%
         group_by(strategy) %>%
-        summarise(is.monotonic = all(diff(cum.surv.death) <= 1e-8), .groups = "drop")
+        summarise(is.monotonic = all(diff(surv.death) <= 1e-8), .groups = "drop")
     if (verbose || !all(mono.check$is.monotonic)) {
         cat("\n--- OS curve monotonicity by strategy (should all be TRUE) ---\n")
         print(mono.check)
@@ -271,6 +337,8 @@ fit.td.gcomp <- function(data.list, verbose=FALSE){
     
     return(list(
         surv.results   = surv.results,
+        coef.df        = coef.df,       # tidy coefficients, both outcomes
+        weight.diag    = weight.diag,   # IPCW distribution summary
         mono.check     = mono.check,
         na.coef.death  = na.coef.death,
         na.coef.irae   = na.coef.irae
@@ -358,7 +426,7 @@ if (sys.nframe() == 0L) {
         "Result must contain required keys" = all(c("surv.results", "mono.check", "na.coef.death", "na.coef.irae") %in% names(res)),
         "surv.results must be a data frame" = is.data.frame(res$surv.results),
         "surv.results must contain strategy, month, and cumulative survival columns" = 
-            all(c("month", "cum.surv.death", "cum.surv.irae", "strategy") %in% names(res$surv.results)),
+            all(c("month", "surv.death", "surv.irae", "strategy") %in% names(res$surv.results)),
         "mono.check must evaluate monotonicity for all strategies" = nrow(res$mono.check) > 0
     )
     

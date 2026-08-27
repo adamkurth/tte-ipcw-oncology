@@ -3,9 +3,12 @@
 # Treatment discontinuation model data simulation for multi-arm discontinuation decision point.
 #################################
 rm(list = ls()); set.seed(20260813)
+base.path <- rprojroot::find_root(rprojroot::is_git_root)
+dir.path <- file.path(base.path, "treatment-discontinuation-model")
+fig.path <- file.path(base.path, "figures", "td-model")
+source(file.path(base.path, "static", "util.r")) # load helpers
 
 
-source(file.path("static", "util.r")) # load helpers
 library(dplyr)
 n <- 7837 # total n initiating treatment
 # Follow-up design aligned with treatment initiation
@@ -172,6 +175,19 @@ irae.month <- rep(Inf, n)
 combo.treatment.types <- c("ICI + Chemo", "ICI + Enfortumab Vedotin", "ICI doublet", "ICI + Targeted Therapy")
 tx.combo.vec <- as.integer(treatment.type %in% combo.treatment.types)
 
+
+    # --- PRE-DRAWN UNIFORMS -----------------------------------------------------
+    # One shared sequential RNG stream means any change to a shift alters some
+    # patient's break month, which changes how many runif() calls they consume and
+    # shifts the stream for every LATER patient. Effect: ci36() is NON-MONOTONE in
+    # the shift even at a fixed seed (measured: range 0.031 over a 0.06 window,
+    # ~6x the calibration tolerance), so uniroot cannot converge and the alternating
+    # calibration falls into a 2-cycle. Indexing a pre-drawn (patient x month) matrix
+    # makes each patient's draws independent of control flow and of other patients.
+    U.disc  <- matrix(runif(n * month.admin.end), nrow = n)
+    U.death <- matrix(runif(n * month.admin.end), nrow = n)
+    U.irae  <- matrix(runif(n * month.admin.end), nrow = n)
+
 for (i in seq_len(n)) {
  
     ecogi <- as.integer(as.character(ecog[i]))  # convert ECOG factor to integer
@@ -185,7 +201,7 @@ for (i in seq_len(n)) {
         # + spikes at clinical decision/scanning intervals (3, 6, 9, 12 months)
         lp.disc <- (-4.5 
             + 0.03 * (age[i] - 65)                      # older age slightly inc disc risk
-            + 0.35 * (ecogi == 1 ) + 0.75 * (ecogi == 2)# ECOG 1 or 2 inc disc risk 
+            + 0.35 * (ecogi == 1 ) + 0.75 * (ecogi == 2) + 0.90 * (ecogi == 3)  # ECOG 1,2,3 inc disc risk
             + 0.20 * (practice.type[i] == "Community")  # community practice slightly inc disc risk
             + 0.20 * (insurance.type[i] == "Medicaid")  # Medicaid insurance slightly inc disc risk
             - 0.10 * (insurance.type[i] == "Private")   # private insurance slightly dec disc risk
@@ -193,7 +209,7 @@ for (i in seq_len(n)) {
             + 0.50 * (m %in% seq(6, 42, by = 6))        # clinical scan interval spikes every 6mo
             + 0.02 * m)                                  # gradual increase in risk over time
  
-        u <- runif(1); p.disc <- expit(lp.disc) # probability of discontinuation at month m
+        u <- U.disc[i, m];  p.disc  <- expit(lp.disc) # probability of discontinuation at month m
         if (u < p.disc ) { 
             discontinue.month[i] <- m; break
         }
@@ -207,7 +223,7 @@ for (i in seq_len(n)) {
  
         lp.death <- (-4.9 
             + 0.05 * (age[i] - 65)                          # older age slightly inc death risk
-            + 0.55 * (ecogi == 1 ) + 1.10 * ( ecogi == 2)   # ECOG 1 or 2 inc death risk
+            + 0.55 * (ecogi == 1 ) + 1.10 * ( ecogi == 2) + 1.50 * (ecogi == 3)   # ECOG 1, 2, or 3 inc death risk
             + 0.40 * stage4                                 # stage IV inc death risk
             + 0.20 * (cancer.type[i] == "Bladder")          # bladder slightly inc death risk
             + 0.15 * (cancer.type[i] == "Kidney")           # kidney slightly inc death risk
@@ -223,11 +239,11 @@ for (i in seq_len(n)) {
             + 0.15 * (cancer.type[i] == "Melanoma")         # melanoma slightly inc IRAE risk
             + 0.20 * (m <= 12))                             # TIME-TREND: first year of therapy inc IRAE risk
  
-        u <- runif(1); p.death <- expit(lp.death) # probability of death at month m
+        u <- U.death[i, m]; p.death <- expit(lp.death) # probability of death at month m
         if (u < p.death ) { 
             death.month[i] <- m; break
         }
-        u <- runif(1); p.irae <- expit(lp.irae) # probability of IRAE at month m
+        u <- U.irae[i, m];  p.irae  <- expit(lp.irae) # probability of IRAE at month m
         if (u < p.irae ) { 
             irae.month[i] <- m; break
         }
@@ -426,7 +442,7 @@ library(ggplot2)
 library(dplyr)
 library(survival)
 library(survminer)
-plot.path <- file.path("figures", "td-model", "td-data")
+# plot.path <- file.path("figures", "td-model", "td-data")
 # Visualization 1: Mechanics of Artificial Censoring
 # Show not just WHEN clones are censored but WHY (mechanism of deviation)
 # this dictates how the IPCW models must be structured
@@ -466,7 +482,7 @@ p1 <- ggplot(censor.data, aes(x = month, fill = censor.reason)) +
   )
  
 print(p1)
-ggsave(filename = file.path(plot.path, "artificial_censoring_distribution.png"), plot = p1, width = 12, height = 8, dpi = 300)
+ggsave(filename = file.path(fig.path, "artificial_censoring_distribution.png"), plot = p1, width = 12, height = 8, dpi = 300)
  
 # ---------------------------------------------------------
 # Visualization 2: Denominator Attrition (At-Risk Pool)
@@ -496,7 +512,7 @@ p2 <- ggplot(attrition.data, aes(x = month, y = patients.at.risk, color = assign
     )
  
 print(p2)
-ggsave(filename = file.path(plot.path, "attrition_over_time.png"), plot = p2, width = 10, height = 6, dpi = 300)
+ggsave(filename = file.path(fig.path, "attrition_over_time.png"), plot = p2, width = 10, height = 6, dpi = 300)
  
  
 # ---------------------------------------------------------
@@ -536,4 +552,4 @@ p3 <- ggsurvplot(
   risk.table.y.text = FALSE # Keeps the risk table clean
 )
 print(p3)
-ggsave(filename = file.path(plot.path, "naive_km_event_free_survival.png"), plot = p3$plot, width = 12, height = 8, dpi = 300)
+ggsave(filename = file.path(fig.path, "naive_km_event_free_survival.png"), plot = p3$plot, width = 12, height = 8, dpi = 300)

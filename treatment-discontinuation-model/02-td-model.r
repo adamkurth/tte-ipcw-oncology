@@ -1,10 +1,4 @@
 # td-model.r
-# 
-# functionalized option for the td-model.r, in use in the td-sensitivity-36mo.r replication loop. 
-# this takes the data list (returned by simulate_td_data() in 
-
-
-################################# 
 rm(list=ls()); set.seed(202608)
 
 library(ggplot2); library(dplyr) # visual
@@ -15,6 +9,7 @@ dir.path <- file.path(base.path, "treatment-discontinuation-model")
 fig.path <- file.path(base.path, "figures", "td-model")
 data.path <- file.path(dir.path, "td-data.rds")
 data <- readRDS(data.path); X <- data$X; X.long <- data$X.long; X.lc <- data$X.lc
+################################# 
 
 # X: patient-level cohort data frame with baseline covariates, treatment types, dates of diagnosis and treatment, and event information (discontinuation, death, irAE)
 #   covariates include: age, sex, race, ECOG performance status, smoking status, practice type, insurance type, initial cancer stage, cancer type, PD-L1 expression, histology, treatment type, IMDC risk score, and event types with corresponding months.
@@ -81,12 +76,16 @@ ggsave(file.path(fig.path, "tte_ipcw_distribution.png"), width = 10, height = 6,
 #   and adjust for genuine baseline confounders. g-comp in est.survival() below still recovers each strategy counterfactual curve by manipulating on.ici directly,
 #   —— it doesn't need assigned.strategy in the outcome model to do that.
 fit.msm.death <- glm(death.event ~ ns(month, df = 3) + 
-                 age + sex + ecog + cancer.type + practice.type + on.ici,
+                 age + sex + ecog + cancer.type + practice.type +
+                 initial.stage +          # in the true death DGP (+0.40 stage IV)
+                 on.ici,
                family = quasibinomial(link = "logit"), 
                weights = ipcw,
                data = X.lc)
 fit.msm.irae <- glm(irae.event ~ ns(month, df = 3) +
-                 age + sex + ecog + cancer.type + practice.type + on.ici,
+                 age + sex + ecog + cancer.type + practice.type +
+                 tx.combo + pd.l1 +       # in the true irAE DGP (+0.25 each)
+                 on.ici,
                family = quasibinomial(link = "logit"), 
                weights = ipcw,
                data = X.lc)
@@ -205,6 +204,70 @@ est.survival <- function(strategy.name, stop.ici.month=NULL){
                   strategy.name, n.na.death, n.na.irae, nrow(tmp.data)))
     }
 
+    # FAIL OPTION B: 
+    # # monthly survival probs 
+    # tmp.data$p.surv.death <- 1 - tmp.data$p.event.death
+    # tmp.data$p.surv.irae  <- 1 - tmp.data$p.event.irae
+    
+    # # sort to ensure cumprod uses chronological per patient
+    # tmp.data <- tmp.data[order(tmp.data$patient.id, tmp.data$month), ]
+ 
+    # # cumulative survival provs per patient over time
+    # tmp.data$surv.death <- ave(tmp.data$p.surv.death, tmp.data$patient.id, FUN=cumprod)
+    # tmp.data$surv.irae  <- ave(tmp.data$p.surv.irae, tmp.data$patient.id, FUN=cumprod)
+
+    
+    # ---- competing-risks cumulative incidence (estimand: option B) ----------
+    # the simulator checks BEFORE irAE within a month, so surviving month j, means surviving both death and irAE in month j.
+    # miroring that order exactly:
+    # 
+    #   S(m)     = prod_{j<=m} (1-pd(j)) * (1-pr(j))        free of BOTH events
+    #   CIF_d(m) = sum_{j<=m}  S(j-1) * pd(j)
+    #   CIF_r(m) = sum_{j<=m}  S(j-1) * (1-pd(j)) * pr(j)
+    #
+    # cif.death now depends on irae model through S(), two outcomes are no longer seperable. 
+    tmp.data <- tmp.data[order(tmp.data$patient.id, tmp.data$month), ]
+
+    p.d <- tmp.data$p.event.death
+    p.r  <- tmp.data$p.event.irae
+    q <- (1-p.d) * (1-p.r) # prob of surviving both events in month j
+
+    # S(m-1): within-patient lagged cumulative product
+    tmp.data$S.lag <- ave(q, tmp.data$patient.id, FUN = function(x) c(1, head(cumprod(x), -1))) # lagged cumprod, S(0) = 1
+    tmp.data$S.both <- ave(q, tmp.data$patient.id, FUN = cumprod) # cumulative product of surviving both events
+    
+    # CIFs: cumulative incidence functions for death and irAE
+    tmp.data$cif.death <- ave(tmp.data$S.lag * p.d,                 tmp.data$patient.id, FUN = cumsum)
+    tmp.data$cif.irae  <- ave(tmp.data$S.lag * (1-p.d) * p.r,       tmp.data$patient.id, FUN = cumsum)
+
+    # plotted quantities: complements of subdistributions
+    tmp.data$surv.death <- 1 - tmp.data$cif.death
+    tmp.data$surv.irae  <- 1 - tmp.data$cif.irae
+
+    # keep separate aggregate() calls from orignal fix. they still stop one outcome's missingness
+    # from contaminating (changing) which patients are averaged into the other outcome's marginal curve at each month.
+    marg.death <- aggregate(surv.death ~ month, data = tmp.data, FUN = mean, na.action = na.omit)
+    marg.irae  <- aggregate(surv.irae  ~ month, data = tmp.data, FUN = mean, na.action = na.omit)
+    marg.surv <- merge(marg.death, marg.irae, by="month", all=TRUE)
+    marg.surv$strategy <- strategy.name
+
+    # ------- guardrail 1: exact identity -------
+    ident <- aggregate(cbind(cif.death, cif.irae, S.both) ~ month, data = tmp.data, FUN = mean)
+    off <- abs(ident$cif.death + ident$cif.irae + ident$S.both - 1)
+    if (any(off > 1e-8)) {
+        cat(sprintf("  [%s] *** CIF IDENTITY VIOLATED: max |CIF_d + CIF_r + S - 1| = %.3e ***\n",
+                    strategy.name, max(off)))
+    }
+
+    # ---- guardrail 2: monotonicity (1 - CIF is non-increasing by construction) ----
+    for (nm in c("surv.death", "surv.irae")) {
+        dd <- diff(marg.surv[[nm]])
+        if (any(dd > 1e-8, na.rm = TRUE)) {
+            cat(sprintf("  [%s] *** NON-MONOTONIC %s at month(s): %s ***\n", strategy.name, nm,
+                        paste(marg.surv$month[-1][which(dd > 1e-8)], collapse = ", ")))
+        }
+    }
+
     # ---------
     # # build design matrix as specified by glmnet training
     # X.pred <- model.matrix( ~ assigned.strategy + ns(month, df=3) +
@@ -231,54 +294,42 @@ est.survival <- function(strategy.name, stop.ici.month=NULL){
     # tmp.data$p.event <- as.numeric(pred.link)
     # ---------
 
-    # monthly survival probs 
-    tmp.data$p.surv.death <- 1 - tmp.data$p.event.death
-    tmp.data$p.surv.irae  <- 1 - tmp.data$p.event.irae
-    
-    # sort to ensure cumprod uses chronological per patient
-    tmp.data <- tmp.data[order(tmp.data$patient.id, tmp.data$month), ]
- 
-    # cumulative survival provs per patient over time
-    tmp.data$cum.surv.death <- ave(tmp.data$p.surv.death, tmp.data$patient.id, FUN=cumprod)
-    tmp.data$cum.surv.irae  <- ave(tmp.data$p.surv.irae, tmp.data$patient.id, FUN=cumprod)
-
-    
     # fix: marginalize each outcome seperately, not with a single
-    #   cbind(cum.surv.death, cum.surv.irae) ~ month, which silently drops any rows with NA in either outcome
+    #   cbind(surv.death, surv.irae) ~ month, which silently drops any rows with NA in either outcome
 
     # aggregate() formula uses na.omit by default combined with cbind() a single NA in either column frops the entire
     # (patient, month) row from both outcomes' averages. Since the irAE model is fit on rare outcomes across the 
     # 8 assigned.strategy strata (more prone to sparse/aliased coefficients -> NA predictions), 
     # an irAE-side NA was silently shrinking and changing the composition of patient set being averaged into death obs. curve
-    # at some months but not others. Since the patient's own cum.surv.death is guarenteed non-inc (cumprod of values [0,1]), 
+    # at some months but not others. Since the patient's own surv.death is guarenteed non-inc (cumprod of values [0,1]), 
     # the only was the marginal curve can go non-monotonic is if the population being averaged isnt the same fixed cohort at every month
     # which is what was happening here.
 
     # aggregate seperately (each with own na.action) means that NA in irAE predictions can no longer contaminate the obs. curve, vice versa
     # use: na.action = pass + explicit counting instead of omitting, so missingness is visible rather than swallowed.
     
-    marg.death <- aggregate(cum.surv.death ~ month, data = tmp.data, FUN = mean, na.action = na.omit)
-    marg.irae  <- aggregate(cum.surv.irae  ~ month, data = tmp.data, FUN = mean, na.action = na.omit)
+    # marg.death <- aggregate(surv.death ~ month, data = tmp.data, FUN = mean, na.action = na.omit)
+    # marg.irae  <- aggregate(surv.irae  ~ month, data = tmp.data, FUN = mean, na.action = na.omit)
 
-    # marg.surv <- aggregate(cbind(cum.surv.death, cum.surv.irae) ~ month, data=tmp.data, FUN=mean)
+    # # marg.surv <- aggregate(cbind(surv.death, surv.irae) ~ month, data=tmp.data, FUN=mean)
     
-    n.months.death <- nrow(marg.death); n.months.irae <- nrow(marg.irae)
-    if(n.months.death < length(months.seq) || n.months.irae < length(months.seq)){
-      cat(sprintf("  [%s] WARNING: dropped months in aggregation -> death: %d/%d, irae: %d/%d\n",
-                  strategy.name, n.months.death, length(months.seq), n.months.irae, length(months.seq)))
+    # n.months.death <- nrow(marg.death); n.months.irae <- nrow(marg.irae)
+    # if(n.months.death < length(months.seq) || n.months.irae < length(months.seq)){
+    #   cat(sprintf("  [%s] WARNING: dropped months in aggregation -> death: %d/%d, irae: %d/%d\n",
+    #               strategy.name, n.months.death, length(months.seq), n.months.irae, length(months.seq)))
 
-    }
-    marg.surv <- merge(marg.death, marg.irae, by="month", all=TRUE)
-    marg.surv$strategy <- strategy.name
+    # }
+    # marg.surv <- merge(marg.death, marg.irae, by="month", all=TRUE)
+    # marg.surv$strategy <- strategy.name
 
-    # guard: each per-strategy marginal death curve must be non-increasing in month
-    # (up to floating point tolerance). If this trips something upstream is still wrong
-    d <- diff(marg.surv$cum.surv.death)
-    if (any(d > 1e-6, na.rm=TRUE)){
-        bad.months <- marg.surv$month[-1][which(d > 1e-8)]
-        cat(sprintf("  [%s] *** NON-MONOTONIC OS CURVE at month(s): %s ***\n",
-              strategy.name, paste(bad.months, collapse = ", ")))
-    }
+    # # guard: each per-strategy marginal death curve must be non-increasing in month
+    # # (up to floating point tolerance). If this trips something upstream is still wrong
+    # d <- diff(marg.surv$surv.death)
+    # if (any(d > 1e-6, na.rm=TRUE)){
+    #     bad.months <- marg.surv$month[-1][which(d > 1e-8)]
+    #     cat(sprintf("  [%s] *** NON-MONOTONIC OS CURVE at month(s): %s ***\n",
+    #           strategy.name, paste(bad.months, collapse = ", ")))
+    # }
     
     return(marg.surv)
 }
@@ -303,8 +354,8 @@ surv.results$strategy <- factor(surv.results$strategy,
 mono.check <- surv.results %>%
     arrange(strategy, month) %>%
     group_by(strategy) %>%
-    summarise(is.monotonic = all(diff(cum.surv.death) <= 1e-8), .groups = "drop")
-cat("\n--- Final monotonicity check for OS (cum.surv.death) across all strategies ---\n")
+    summarise(is.monotonic = all(diff(surv.death) <= 1e-8), .groups = "drop")
+cat("\n--- Final monotonicity check for OS (surv.death) across all strategies ---\n")
 print(mono.check)
 if (!all(mono.check$is.monotonic)) {
     cat("\nIf any FALSE remain after the aggregate() fix above, re-run the\n",
@@ -322,10 +373,10 @@ if (!all(mono.check$is.monotonic)) {
 cat("\n---48-mo survival by strategy, in target-month order (should be roughly monotonic)---\n")
 end.of.fu <- surv.results[surv.results$month == max(months.seq), ] %>%
   arrange(strategy) %>%
-  select(strategy, cum.surv.death)
+  select(strategy, surv.death)
 print(as.data.frame(end.of.fu))
 cat(sprintf("spearman correlation (target month vs. 48-mo survival) : %.3f  (expect strongly positive)\n",
-            suppressWarnings(cor(as.integer(end.of.fu$strategy), end.of.fu$cum.surv.death, method = "spearman"))))
+            suppressWarnings(cor(as.integer(end.of.fu$strategy), end.of.fu$surv.death, method = "spearman"))))
 
 
 
@@ -346,12 +397,12 @@ cat(sprintf("spearman correlation (target month vs. 48-mo survival) : %.3f  (exp
 library(tidyr)
 plot.data <- surv.results %>%
   pivot_longer(
-    cols = c(cum.surv.death, cum.surv.irae),
+    cols = c(surv.death, surv.irae),
     names_to = "event.type",
     values_to = "probability"
   ) %>%
   mutate(
-    event.type = ifelse(event.type == "cum.surv.death", 
+    event.type = ifelse(event.type == "surv.death", 
                         "Overall Survival (Mortality)", 
                         "irAE-Free Survival (Toxicity)")
   )
@@ -378,16 +429,16 @@ ggsave(file.path(fig.path, "td_marginal_competing_risks.png"), width = 14, heigh
 cont.48 <- surv.results[surv.results$month == 48 & surv.results$strategy == "cont", ]
 disc.42 <- surv.results[surv.results$month == 48 & surv.results$strategy == "disc.42mo", ]
  
-rd.death <- cont.48$cum.surv.death - disc.42$cum.surv.death
-rd.irae  <- cont.48$cum.surv.irae - disc.42$cum.surv.irae
+rd.death <- cont.48$surv.death - disc.42$surv.death
+rd.irae  <- cont.48$surv.irae - disc.42$surv.irae
  
 cat("\n--- END OF FOLLOW-UP (48 MONTHS) EVALUATION ---\n")
 cat("OVERALL SURVIVAL (MORTALITY)\n")
-cat(sprintf("  Survival (Continue):             %.2f%%\n", cont.48$cum.surv.death * 100))
-cat(sprintf("  Survival (Discontinue at 42 Mo): %.2f%%\n", disc.42$cum.surv.death * 100))
+cat(sprintf("  Survival (Continue):             %.2f%%\n", cont.48$surv.death * 100))
+cat(sprintf("  Survival (Discontinue at 42 Mo): %.2f%%\n", disc.42$surv.death * 100))
 cat(sprintf("  Risk Difference:                 %.2f%% (Percentage Points)\n", rd.death * 100))
  
 cat("\nIRAE-FREE SURVIVAL (TOXICITY)\n")
-cat(sprintf("  irAE-Free (Continue):             %.2f%%\n", cont.48$cum.surv.irae * 100))
-cat(sprintf("  irAE-Free (Discontinue at 42 Mo): %.2f%%\n", disc.42$cum.surv.irae * 100))
-cat(sprintf("  Risk Difference:                 %.2f%% (Percentage Points)\n", rd.irae * 100))
+cat(sprintf("  irAE-Free (Continue):             %.2f%%\n", cont.48$surv.irae * 100))
+cat(sprintf("  irAE-Free (Discontinue at 42 Mo): %.2f%%\n", disc.42$surv.irae * 100))
+cat(sprintf("  Risk Difference:                 %.2f%% (Percentage Points)\n", rd.irae * 100))å
